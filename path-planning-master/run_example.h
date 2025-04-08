@@ -15,6 +15,6 @@ using namespace std;
 
 void run_example_1();
 
-tuple<vector<vector<double>>, vector<Result>> run_example();
+tuple<vector<vector<double>>, vector<Result>> run_example_2();
 
 #endif //MYPATHPLANNING_RUN_EXAMPLE_H

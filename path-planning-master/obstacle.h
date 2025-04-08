@@ -11,7 +11,7 @@ struct Obstacle {
     double x, y;
     // 切面圆半径
     double real_r;
-    //
+    // 比例尺
     double kv;
     // 禁飞区二维数组
     std::vector<std::vector<int>> V;

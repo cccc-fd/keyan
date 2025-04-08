@@ -1,4 +1,6 @@
 #include <cmath>
+//#include <Python.h>
+//#include <libInterpolate/Interpolate.hpp>
 
 #include "utils.h"
 
@@ -282,7 +284,7 @@ tuple<int, double> calcu_cycle_count(double F, int h, vector<int> _goal) {
 
     // 判断double类型的数据，使用一个极小值 eps = 1e-6 辅助
     int cycle_count = 0;
-    if (uav_d > goal_d) {
+    if (uav_d > goal_d + eps) {
         cycle_count = 1;
     } else {
         cycle_count = (int) ceil(goal_d / uav_d);
@@ -290,116 +292,295 @@ tuple<int, double> calcu_cycle_count(double F, int h, vector<int> _goal) {
     return {cycle_count, goal_length};
 }
 
+
+/*
+ ********************************** PathPlanning begin *******************************
+ * */
 /**
- * 将数据写在csv文件中
- * @param res
+ * 返回最小化的函数，即当没有任何障碍冲突时的路径长度。
+ * PathPlanning USE
+ * calc_path_length for vector<double>
+ * @param agent_pos
+ * @param args
+ * @return
  */
-void outResult(const vector<Result>& res) {
-    // 文件位置及文件名
-    string filename = "C:/Users/15017/Desktop/data.csv";
-    // 以写模式打开文件
-    // ofstream outFile(filename, ios::out);
-    ofstream outFile(filename);
-    // 检查文件是否成功打开
-    if (!outFile.is_open()) {
-        std::cout << "无法打开文件" << std::endl;
-        return;
+tuple<double, int, vector<double>, vector<double>>
+calc_path_length(vector<double> agent_pos, Args &args) {
+    // 获取参数数据
+    int Xs = args.starts_odv[0];
+    int Ys = args.starts_odv[1];
+    int Xg = args.goals_odv[0];
+    int Yg = args.goals_odv[1];
+    vector<Obstacle> obs = args.obs;
+    int pointNums = args.interpolationPointNums;
+    string _finterp = args.interpolationKind;
+
+    // 这种情况下是较为特殊的，最后算一维数组
+    int n_pop = 1;
+    int dim = (int) agent_pos.size();
+    int n_pts = dim / 2;
+
+    // 分别对x和y构建数据，为插值函数做准备
+    vector<double> x, y;
+    x.reserve(n_pts + 2);
+    y.reserve(n_pts + 2);
+
+    // x的数据，参考数据，以x为因变量
+    x.push_back(Xs);
+    for (int i = 0; i < n_pts; i++) x.push_back(agent_pos[i]);
+    x.push_back(Xg);
+
+    // y数据，因变量
+    y.push_back(Ys);
+    for (int i = n_pts; i < agent_pos.size(); i++) y.push_back(agent_pos[i]);
+    y.push_back(Yg);
+
+    // **************************** 插值方法 ********************************
+    // 创建已有数据
+    int len = n_pts + 2;
+    double *x0 = new double[len];
+    for (int i = 0; i < len; i++) {
+        x0[i] = (1.0 - 0.0) / (len - 1) * i;
+    }
+    // 创建插值点
+    double *ss = new double[pointNums];
+    for (int i = 0; i < pointNums; i++) {
+        ss[i] = (1.0 - 0.0) / (pointNums - 1) * i;
+    }
+    // 已有数据，和x0配合生成插值函数
+    double *cur_x = new double[len];
+    double *cur_y = new double[len];
+    for (int i = 0; i < x.size(); i++) {
+        cur_x[i] = x[i];
+        cur_y[i] = y[i];
     }
 
-    for (int i = 0; i < res.size(); i++) {
-        // 获取当前结果
-        Result cur_res = res[i];
-        // 1.输出best_pos
-        for (int j = 0; j < cur_res.best_pos.size(); j++) {
-            if (j == 0) outFile << to_string(cur_res.best_pos[j]);
-            else outFile << "," << to_string(cur_res.best_pos[j]);
-        }
-        outFile << endl;
-        // 2.输出总路径长度
-        outFile << to_string(cur_res.X) << endl;
+    double *xx = new double[pointNums];
+    double *yy = new double[pointNums];
 
-        // 3.输出路径中在障碍点的个数
-        outFile << to_string(cur_res.obs_count) << endl;
-
-        // 4.输出x的插值
-        for (int j = 0; j < cur_res.Px.size(); j++) {
-            if (j == 0) outFile << to_string(cur_res.Px[j]);
-            else outFile << "," << to_string(cur_res.Px[j]);
+    // Px：插值得到的x坐标  Py：插值得到的y坐标
+    vector<double> Px, Py;
+    Px.reserve(pointNums);
+    Py.reserve(pointNums);
+    try {
+        SplineInterface *sp_x = new Spline(x0, cur_x, len);
+        sp_x->AutoInterp(pointNums, ss, xx);
+        // 将数据转化为vector类型数组
+        for (int i = 0; i < pointNums; i++) {
+            Px.emplace_back(xx[i]);
         }
-        outFile << endl;
+        delete sp_x;
+        sp_x = nullptr;
 
-        // 5.输出y的插值坐标
-        for (int j = 0; j < cur_res.Py.size(); j++) {
-            if (j == 0) outFile << to_string(cur_res.Py[j]);
-            else outFile << "," << to_string(cur_res.Py[j]);
+        SplineInterface *sp_y = new Spline(x0, cur_y, len);    //使用接口，且使用默认边界条件
+        sp_y->AutoInterp(pointNums, ss, yy);            //求x的插值结果y
+        // 数据转换为vector
+        for (int i = 0; i < pointNums; i++) {
+            Py.emplace_back(yy[i]);
         }
-        outFile << endl;
+        delete sp_y;
+        sp_y = nullptr;
+    } catch (SplineFailure sf) {
+        cout << sf.GetMessage() << endl;
     }
 
-    outFile.close();
+    // **************************** 替换插值方法 end ********************************
+
+    // 构建差分数组
+    vector<double> dx = numpy_diff(Px);
+    vector<double> dy = numpy_diff(Py);
+    double L = 0.0;
+    for (int i = 0; i < dx.size(); i++) {
+        L += sqrt(dx[i] * dx[i] + dy[i] * dy[i]);
+    }
+
+    // 惩罚值
+    double err;
+    int count;
+    tie(err, count) = path_penalty(obs, Px, Py);
+
+    args.res = {L, count, Px, Py};
+
+    // 释放资源
+    delete[] yy;
+    yy = nullptr;
+    delete[] xx;
+    xx = nullptr;
+    delete[] cur_x;
+    cur_x = nullptr;
+    delete[] cur_y;
+    cur_y = nullptr;
+    delete[] ss;
+    ss = nullptr;
+    delete[] x0;
+    x0 = nullptr;
+
+    return {L, count, Px, Py};
+};
+//******************************** PathPlanning end ************************************
+
+
+
+
+
+//********************************* other tools begin ***************************************
+/**
+ * 如果路径中的任何一点违反了任何障碍，则返回惩罚值。为了加快计算速度，算法被设计为同时处理所有点。
+ * @param obs   障碍
+ * @param Px    插值后的路径点x坐标
+ * @param Py    插值后的路径点x坐标
+ * @return
+ */
+tuple<double, int> path_penalty(const vector<Obstacle> &obs, vector<double> Px, vector<double> Py) {
+    // 在一维参数里面，err就是一个数而已
+    double err = 0.0;
+    int count = 0;
+
+    vector<bool> inside;
+
+    for (int ii = 0; ii < obs.size(); ii++) {
+        inside.clear();
+        // 获取参数
+        string name = obs[ii].type_name;
+        double xc = obs[ii].x;
+        double yc = obs[ii].y;
+        double Kv = obs[ii].kv;
+
+        // 计算距离障碍中心的距离
+        vector<double> distance(Px.size());
+        for (int i = 0; i < Px.size(); i++) {
+            distance[i] = sqrt((Px[i] - xc) * (Px[i] - xc) + (Py[i] - yc) * (Py[i] - yc));
+        }
+
+        if (name == "Circle") {
+            double r = obs[ii].real_r;
+            for (double dis: distance) {
+                inside.push_back(r > dis);
+            }
+        } else if (name == "Ellipse") {
+            // 椭圆模型 暂时没有
+        } else if (name == "Convex") {
+            vector<vector<int>> V = obs[ii].V;
+            vector<double> a(Px.size(), numeric_limits<double>::infinity());
+            vector<double> side(Px.size());
+            for (int i = 0; i < V.size(); i++) {
+                int index = ((i - 1) + V.size()) % V.size();
+                for (int j = 0; j < Px.size(); j++) {
+                    side[j] = (Py[j] - V[index][1]) * (V[i][0] - V[index][0]) -
+                              (Px[j] - V[index][0]) * (V[i][1] - V[index][1]);
+                    a[j] = fmin(a[j], side[j]);
+                }
+            }
+            for (double e: a) inside.push_back(e > 0.0);
+        }
+
+        // 标记是否有插值点在障碍内部，inside为true则是有
+        bool flag = false;
+
+        vector<double> penalty(Px.size(), 0.0);
+        for (int j = 0; j < distance.size(); j++) {
+            if (inside[j]) {
+                penalty[j] = Kv / distance[j];
+                flag = true;
+            }
+        }
+        // 有插值点在障碍物内部
+        if (flag) count++;
+
+        double sum = 0.0;
+        int len = 0;
+        for (int j = 0; j < penalty.size(); j++) {
+            sum += penalty[j];
+            len++;
+        }
+        err += sum / len;
+    }
+    return {err, count};
 }
 
 /**
- * 调用python插值
+ *
  * @param nums      y
  * @param pointNums 插值点个数
  * @return 插值得到的数组
  */
-vector<double> interpolation(const vector<double>& nums, int pointNums) {
-    // 1.初始化python解释器
-    // Py_Initialize();
-    // 2.初始化python系统文件路径，保证可以访问到 .py文件
-    PyRun_SimpleString("import sys");
-    // 在CMake中，这个路径要从cmake-build-release出发或者cmake-build-debug出发
-    PyRun_SimpleString("sys.path.append('../script')");
-    // 3.调用python文件名，不用写后缀
-    PyObject *pModule = PyImport_ImportModule("interpolation_script");
-    // 4.指定调用函数
-    PyObject *pFunc = PyObject_GetAttrString(pModule, "get_interpolation_nums");
-
-    // 5.设置参数
-    // 5.1 获取一个python列表
-    PyObject* pyParams = PyList_New(0);
-    // 5.2 给列表赋值
-    for (int i = 0; i < nums.size(); i++) {
-        PyList_Append(pyParams, Py_BuildValue("d", nums[i]));
-    }
-    // 6.构造python的方法参数，两个参数
-    PyObject* args = PyTuple_New(2);
-    // 设置函数实参 变量格式转换成python格式
-    PyTuple_SetItem(args, 0, pyParams);
-    PyTuple_SetItem(args, 1, Py_BuildValue("i", pointNums));
-    // 函数调用，得到返回值列表
-    PyObject* pyList =  PyEval_CallObject(pFunc, args);
-
-    int size = PyList_Size(pyList);
-    vector<double> datas;
-    datas.reserve(size);
-    PyObject *item;
-    for (int i = 0; i < size; i++) {
-        // 得到每一项
-        item = PyList_GetItem(pyList, i);
-        double d = (double) PyFloat_AsDouble(item);
-        datas.emplace_back(d);
-    }
-
-    // for (double d : datas) cout << d << ' ';
+vector<double> interpolation(const vector<double> &nums, int pointNums) {
+//    // 1.初始化python解释器
+//    Py_Initialize();
+//    // 2.初始化python系统文件路径，保证可以访问到 .py文件
+//    PyRun_SimpleString("import sys");
+//    // 在CMake中，这个路径要从cmake-build-release出发或者cmake-build-debug出发
+//    PyRun_SimpleString("sys.path.append('../script')");
+//    // 3.调用python文件名，不用写后缀
+//    PyObject *pModule = PyImport_ImportModule("interpolation_script");
+//    // 4.指定调用函数
+//    PyObject *pFunc = PyObject_GetAttrString(pModule, "get_interpolation_nums");
+//
+//    // 5.设置参数
+//    // 5.1 获取一个python列表
+//    PyObject *pyParams = PyList_New(0);
+//    // 5.2 给列表赋值
+//    for (int i = 0; i < nums.size(); i++) {
+//        PyList_Append(pyParams, Py_BuildValue("d", nums[i]));
+//    }
+//    // 6.构造python的方法参数，两个参数
+//    PyObject *args = PyTuple_New(2);
+//    // 设置函数实参 变量格式转换成python格式
+//    PyTuple_SetItem(args, 0, pyParams);
+//    PyTuple_SetItem(args, 1, Py_BuildValue("i", pointNums));
+//    // 函数调用，得到返回值列表
+//    PyObject *pyList = PyEval_CallObject(pFunc, args);
+//
+//    int size = PyList_Size(pyList);
+//    vector<double> datas;
+//    datas.reserve(size);
+//    PyObject *item;
+//    for (int i = 0; i < size; i++) {
+//        // 得到每一项
+//        item = PyList_GetItem(pyList, i);
+//        double d = (double) PyFloat_AsDouble(item);
+//        datas.emplace_back(d);
+//    }
+//
+//    // for (double d : datas) cout << d << ' ';
 //    delete item;
 //    delete pyList;
 //    delete args;
 //    delete pyParams;
 //    delete pFunc;
 //    delete pModule;
-
-    // Py_Finalize();
-
-    return datas;
+//
+//    Py_Finalize();
+//
+//    return datas;
 }
 
 /**
- * 获取一组数据
- * @return
+ * 一维数组拷贝，类型：vector<double>
+ * @param origin
+ * @param target
  */
+void deepcopy(const vector<double> &origin, vector<double> &target) {
+    int index = 0;
+    for (auto e: origin) {
+        target[index++] = e;
+    }
+}
+
+/**
+ * 拷贝二维数组，类型：vector<vector<double>>
+ * @param origin        原数组
+ * @param vec_target    新数组
+ */
+void deepcopy(const vector<vector<double>> &origin, vector<vector<double>> &vec_target) {
+    for (int i = 0; i < origin.size(); i++) {
+        for (int j = 0; j < origin[i].size(); j++) {
+            vec_target[i][j] = origin[i][j];
+        }
+    }
+}
+
+
 vector<vector<double>> getData() {
     vector<vector<double>> res = {
             {138.5621923, 1.70900606,  178.0007115, 168.5031066, 51.671561,   117.1022784},
@@ -505,4 +686,5 @@ vector<vector<double>> getData() {
     };
     return res;
 }
+
 //********************************* other tools end ************************************************

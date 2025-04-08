@@ -1,14 +1,15 @@
 #include "run_example.h"
 #include <chrono>
 
-tuple<vector<vector<double>>, vector<Result>> run_example() {
+tuple<vector<vector<double>>, vector<Result>> run_example_2() {
     cout << "-------------------------- 程序开始 --------------------------" << endl;
     cout << "断点个数：" << nPts << endl;
-    cout << "路径插值点个数：" << pointNums << endl;
+    cout << "路径插值点个数：" << ns << endl;
     cout << "粒子个数：" << nPop << endl;
     cout << "每一次运行迭代次数：" << epochs << endl;
     cout << "插值方法：" << f_interp << endl;
     cout << "--------------------------- GO ON ---------------------------" << endl;
+
 
     // start行 goals列 但使用匈牙利算法，要求是n行n列的矩阵
     vector<vector<double>> uav_sum_length(uavs_start.size(),
@@ -18,22 +19,16 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
     vector<Result> Map_res;
     // 障碍信息是通用的，获取一次就行，避免重复获取
     vector<Obstacle> obs = get_all_obs();
+    // 随机数种子
+    // srand(1294404794);
     // 空间限制
     PathPlanning pathPlanning(limits);
-    // 设置全局随机数种子
-    uint32_t seed = chrono::system_clock::now().time_since_epoch().count();
-    cout << "seed = " << seed << endl;
-//    pathPlanning.setSeed(seed);
-    pathPlanning.setSeed(1284706116);
-    int kv = 80;
-    pathPlanning.setVisual(12);
-
     // 加载障碍信息
     for (const auto &ob: obs) {
         if (ob.type_name == "cir") {
-            pathPlanning.add_circle_obs(ob.x, ob.y, ob.real_r, kv);
+            pathPlanning.add_circle_obs(ob.x, ob.y, ob.real_r, 100);
         } else if (ob.type_name == "con") {
-            pathPlanning.add_convex(ob.x, ob.y, ob.V, kv);
+            pathPlanning.add_convex(ob.x, ob.y, ob.V, 100);
         }
     }
 
@@ -67,7 +62,9 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
                     pathPlanning.setTarget(goal_data[num]);
 
                     // ---------------------------------开始------------------------------
-                    tie(best_pos, X, count, Px, Py) = pathPlanning.optimize(nPts, pointNums, nPop, epochs, 2.05, 0.5, 0.1);
+                    tie(best_pos, X, count, Px, Py) = pathPlanning.optimize(nPts, ns, nPop, epochs, 0, 2.05, 0.5, "RB",
+                                                                            "", false,
+                                                                            0.1, f_interp, Xinit);
 
                     PathPlanning _result = pathPlanning;
                     Map_res.emplace_back(best_pos, X, count, Px, Py);
@@ -85,6 +82,12 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
                     double l2 = 0;
                     double l3 = get_l3(goal_data[num], L);
                     uav_sum_length[uav][co++] = l1 + l2 + l3;
+
+                    // TODO 画图
+                    // fig, axs = plt.subplots()
+                    // plot_obs(axs,layout.obs)
+                    // plot_path(axs,[layout.res],[layout.start],[layout.goal])
+                    // plot_goal(axs,[layout.target])
                 }
             } else if (goal_type == "surface_goals") {
                 // 参数声明
@@ -112,7 +115,9 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
 
                         // ---------------------------------开始------------------------------
 
-                        tie(best_pos, X, count, Px, Py) = pathPlanning.optimize(nPts, pointNums, nPop, epochs, 2.05, 0.5, 0.1);
+                        tie(best_pos, X, count, Px, Py) = pathPlanning.optimize(nPts, ns, nPop, epochs, 0, 2.05, 0.5,
+                                                                                "RB", "", false,
+                                                                                0.1, f_interp, Xinit);
                         PathPlanning _result = pathPlanning;
                         Map_res.emplace_back(best_pos, X, count, Px, Py);
 
@@ -131,6 +136,9 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
                         double l3 = get_l3(goal_data[num], l1, cycle_count, goal_length);
                         uav_sum_length[uav][co++] = L + l2 + l3;
 
+                        /*
+                         * TODO: 画图
+                         * */
                     } else { // 面型目标
                         cout << "面型目标" << endl;
                         // 设置参数
@@ -138,7 +146,9 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
                         pathPlanning.setGoal(goal_data[num]);
                         pathPlanning.setTarget(goal_data[num]);
 
-                        tie(best_pos, X, count, Px, Py) = pathPlanning.optimize(nPts, pointNums, nPop, epochs, 2.05, 0.5, 0.1);
+                        tie(best_pos, X, count, Px, Py) = pathPlanning.optimize(nPts, ns, nPop, epochs, 0, 2.05, 0.5,
+                                                                                "RB", "", false,
+                                                                                0.1, f_interp, Xinit);
                         PathPlanning _result = pathPlanning;
                         Map_res.emplace_back(best_pos, X, count, Px, Py);
 
@@ -146,8 +156,7 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
                         int obs_count = _result.getRes().obs_count;
 
                         cout << "start = [" << pathPlanning.getStart()[0] << ", " << pathPlanning.getStart()[1] << "]";
-                        cout << "\tgoal = [" << pathPlanning.getGoal()[0] << ", " << pathPlanning.getGoal()[1] << "]"
-                             << endl;
+                        cout << "\tgoal = [" << pathPlanning.getGoal()[0] << ", " << pathPlanning.getGoal()[1] << "]" << endl;
 
                         cout << "路径长度为：" << L << "\tcount = " << obs_count << endl;
                         cout << endl;
@@ -156,6 +165,8 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
                         double l2 = get_l2(cycle_count, goal_length);
                         double l3 = get_l3(goal_data[num], l1, cycle_count, goal_length);
                         uav_sum_length[uav][co++] = L + l2 + l3;
+
+                        // TODO 画图
                     }
                 }
             }
@@ -163,10 +174,9 @@ tuple<vector<vector<double>>, vector<Result>> run_example() {
     }
     cout << "--------------------------程序结束--------------------------" << endl;
     auto end_time = chrono::high_resolution_clock::now();
-    chrono::duration<double> run_time = end_time - start_time;
+    chrono::duration<double> run_time =  end_time - start_time;
     cout << "PSO迭代时间" << run_time.count() << "秒" << endl;
-
-    // 打印代价矩阵
+    // cout << uav_sum_length << endl;
     for (int i = 0; i < uav_sum_length.size(); i++) {
         for (int j = 0; j < uav_sum_length[i].size(); j++) {
             if (j == 0) cout << uav_sum_length[i][j];

@@ -1,278 +1,14 @@
-//
-// Created by 15017 on 2024/5/17.
-//
-#include <chrono>
-
-#include "PSOAFSA.h"
-
-/**
- * 缺省无参构造
- */
-PSOAFSA::PSOAFSA() = default;
-
-/**
- * 有参构造器 设置随机数种子
- * @param seed 随机数种子
- */
-PSOAFSA::PSOAFSA(uint32_t seed) {
-    engine.seed(seed);
-}
-
-
-/**
- * PSO-AFSA算法
- * @param LB        空间下限
- * @param UB        空间上限
- * @param n_pop     粒子数
- * @param epochs    迭代次数
- * @param phi
- * @param vel_fact  速度约束
- * @param rad
- * @param args      参数
- * @param conf_type 插值方式：缺省cubic
- * @param interpolation_mode 速度约束方式
- * @return
- */
-tuple<vector<double>, tuple<double, int, int>>
-PSOAFSA::PSO_AFSA(vector<int> LB, vector<int> UB, int n_pop, int epochs, double phi, double vel_fact, double rad, const Args &args,
-    const string &conf_type, string interpolation_mode) {
-    // 空间维度 Spatial dimension
-    int dim = (int) LB.size();
-
-    // 速度限制
-    vector<double> vel_max(dim, 0.0);
-    vector<double> vel_min(dim, 0.0);
-    for (int i = 0; i < dim; i++) {
-        vel_max[i] = vel_fact * (UB[i] - LB[i]);
-        vel_min[i] = -vel_max[i];
-    }
-
-    // 0-1 之间的随机数
-    uniform_real_distribution<> dis(0.0, 1.0);
-
-    //******************************* PSO 算法 **********************************
-    // 步骤1：初始化整个种群，尽量将粒子随机的分布在整个搜索空间上，以提高找到最优值的可能性
-    // 步骤1.1：定义每个粒子的初始位置，使粒子尽量随机的分布在整个搜索空间
-    // 粒子数量：nPop，粒子的维度：nVar；空间限制：[0, 200]
-    vector<vector<double>> agent_pos(n_pop, vector<double>(dim));
-    for (int i = 0; i < n_pop; i++) {
-        for (int j = 0; j < dim; j++) {
-            agent_pos[i][j] = LB[j] + dis(engine) * (UB[j] - LB[j]);
-        }
-    }
-
-    // 步骤1.2：初始化每一个粒子的速度，初始化每个粒子的速度，也是随机的
-    // 粒子数量：nPop，粒子维度：dim
-    vector<vector<double>> agent_vel(n_pop, vector<double>(dim));
-    for (int i = 0; i < n_pop; i++) {
-        for (int j = 0; j < dim; j++) {
-            // agent_vel[i][j] = (LB[j] - agent_pos[i][j]) + (double) rand() / RAND_MAX * (UB[j] - LB[j]);
-            agent_vel[i][j] = (LB[j] - agent_pos[i][j]) + dis(engine) * (UB[j] - LB[j]);
-            // 限制速度不能大于vel_max 不能小于vel_min
-            agent_vel[i][j] = fmin(fmax(agent_vel[i][j], vel_min[j]), vel_max[j]);
-        }
-    }
-
-    // 步骤2：计算个体适应度
-    vector<vector<double>> agent_pos_orig(n_pop, vector<double>(dim));
-    vector<double> agent_cost(n_pop);
-    vector<vector<double>> afas_pos(n_pop, vector<double>(dim));
-    vector<double> afas_cost(n_pop);
-
-    // 测试：
-    // agent_pos = getData();
-    // 计算代价函数 得到代价
-    tie(agent_cost, afas_pos, afas_cost) = path_length(agent_pos, args);
-
-    // 找出此次迭代结果的最优解
-    vector<bool> better;
-    better.reserve(n_pop);
-    for (int i = 0; i < n_pop; i++) {
-        better.push_back(afas_cost[i] < agent_cost[i]);
-    }
-    for (int i = 0; i < n_pop; i++) {
-        if (better[i]) {
-            // 本次迭代中找到的最好位置
-            agent_pos[i].assign(afas_pos[i].begin(), afas_pos[i].end());
-            // 本次最好位置的代价
-            agent_cost[i] = afas_cost[i];
-        }
-    }
-
-    // 更新每个粒子的最好pos和cost
-    vector<vector<double>> agent_best_pos(agent_pos);
-    vector<double> agent_best_cost(agent_cost);
-
-    // 更新全局的最好pos和cost
-    // 行代表粒子的个数
-    // 找到最好的粒子位置
-    int idx = min_element(agent_best_cost.begin(), agent_best_cost.end()) - agent_best_cost.begin();
-    vector<double> swarm_best_pos(agent_best_pos[idx].begin(), agent_best_pos[idx].end());
-    double swarm_best_cost = agent_best_cost[idx];
-    int swarm_best_idx = idx;
-
-    // 全局最优 使用 swarm_best_pos 填充
-    vector<vector<double>> group_best_pos(n_pop);
-    group_best_pos.assign(n_pop, swarm_best_pos);
-
-    vector<double> p_equal_g(n_pop, 1.0);
-    p_equal_g[idx] = 0.75;
-
-    // per_cost: 记录所有最小代价，可以用于看代价是如何下降的
-    vector<double> per_cost;
-    per_cost.reserve(n_pop);
-
-    // 记录当前最小代价 有些抽象，为什么会 * 2 + 20
-    per_cost.push_back(agent_best_cost[idx] * 2 + 20);
-
-    //************************************** 开始迭代 *****************************************
-
-    for (int epoch = 0; epoch < epochs; epoch++) {
-        // 动态更新惯性因子 w
-        double w = 0.9 - epoch * (0.9 - 0.2) / epochs;
-        // 步骤3：更新粒子的状态
-        // 行代表第i个粒子 列代表维度
-        for (int i = 0; i < n_pop; i++) {
-            for (int j = 0; j < dim; j++) {
-                // 步骤3.1：更新粒子的速度参数是  c1 = 1.5  c2 = 1.2
-                agent_vel[i][j] = w * agent_vel[i][j] + 1.5 * (agent_best_pos[i][j] - agent_pos[i][j]) +
-                                  1.2 * (group_best_pos[i][j] - agent_pos[i][j]);
-                // 速度限制，速度不能太大，也不能太小
-                agent_vel[i][j] = fmin(fmax(agent_vel[i][j], vel_min[j]), vel_max[j]);
-            }
-        }
-
-        vector<vector<double>> agent_pos_tmp(n_pop, vector<double>(dim));
-
-        // 计算速度更新后的位置
-        for (int i = 0; i < n_pop; i++) {
-            for (int j = 0; j < dim; j++) {
-                agent_pos_tmp[i][j] = agent_pos[i][j] + agent_vel[i][j];
-            }
-        }
-
-        // 标识粒子是否超出范围
-        vector<vector<bool>> out(n_pop, vector<bool>(dim, false));
-        for (int i = 0; i < n_pop; i++) {
-            for (int j = 0; j < dim; j++) {
-                if (agent_pos_tmp[i][j] > LB[j] || agent_pos_tmp[i][j] < UB[j]) {
-                    out[i][j] = true;
-                }
-            }
-        }
-
-        // 对速度进行限制 改变速度 使得粒子加上速度后不超过范围
-        vector<vector<double>> vel_conf;
-        if (conf_type == "RB") {
-            vel_conf = random_back_conf(agent_vel);
-        } else if (conf_type == "HY") {
-            vel_conf = hyperbolic_conf(agent_pos, agent_vel, UB, LB);
-        } else if (conf_type == "MX") {
-            vel_conf = mixed_conf(agent_pos, agent_vel, UB, LB);
-        }
-
-        // 对出界粒子应用限制规则
-        for (int i = 0; i < n_pop; i++) {
-            for (int j = 0; j < dim; j++) {
-                if (out[i][j]) {
-                    agent_vel[i][j] = vel_conf[i][j];
-                }
-                // 对速度进行更新后，再更新位置
-                agent_pos[i][j] += agent_vel[i][j];
-            }
-        }
-
-        // 对依然出界的粒子进行限制边界
-        for (int i = 0; i < n_pop; i++) {
-            for (int j = 0; j < dim; j++) {
-                agent_pos[i][j] = fmin(fmax(agent_pos[i][j], LB[j]), UB[j]);
-            }
-        }
-
-        // 计算更新后的损失
-        tie(agent_cost, afas_pos, afas_cost) = path_length(agent_pos, args);
-
-        // 找出此次迭代结果的最优解
-        for (int i = 0; i < n_pop; i++) {
-            if (afas_cost[i] < agent_cost[i]) {
-                agent_pos[i].assign(afas_pos[i].begin(), afas_pos[i].end());
-                agent_cost[i] = afas_cost[i];
-            }
-        }
-
-        // 更新个体历史最优
-        for (int i = 0; i < agent_best_pos.size(); i++) {
-            if (agent_cost[i] < agent_best_cost[i]) {
-                agent_best_pos[i].assign(agent_pos[i].begin(), agent_pos[i].end());
-                agent_best_cost[i] = agent_cost[i];
-            }
-        }
-
-        // 更新全局历史最优
-        idx = min_element(agent_best_cost.begin(), agent_best_cost.end()) - agent_best_cost.begin();
-        if (agent_best_cost[idx] < swarm_best_cost) {
-            swarm_best_pos.assign(agent_best_pos[idx].begin(), agent_best_pos[idx].end());
-            swarm_best_cost = agent_best_cost[idx];
-            swarm_best_idx = idx;
-        }
-
-        // 全局极值
-        group_best_pos.assign(n_pop, swarm_best_pos);
-        p_equal_g.assign(n_pop, 1.0);
-        p_equal_g[idx] = 0.75;
-        per_cost.push_back(agent_best_cost[idx] * 2 + 20);
-
-    }
-    //<-------------------------------------- 迭代完毕 --------------------------------------------->
-
-    vector<vector<double>> delta(n_pop, vector<double>(dim));
-    vector<double> deltaB(dim);
-
-    for (int i = 0; i < dim; i++) {
-        deltaB[i] = fmax(UB[i] - LB[i], 1e-10);
-    }
-    for (int i = 0; i < n_pop; i++) {
-        for (int j = 0; j < dim; j++) {
-            delta[i][j] = (agent_best_pos[i][j] - swarm_best_pos[j]) / deltaB[j];
-        }
-    }
-
-    // 为计算范数做准备
-    vector<vector<double>> tmp1(n_pop, vector<double>(dim));
-    for (int i = 0; i < n_pop; i++) {
-        for (int j = 0; j < dim; j++) {
-            tmp1[i][j] = delta[i][j] / sqrt(n_pop);
-        }
-    }
-    vector<double> dist(n_pop);
-    for (int i = 0; i < n_pop; i++) {
-        double _sum = 0;
-        // 每一行的平方和
-        for (int j = 0; j < dim; j++) {
-            _sum += tmp1[i][j] * tmp1[i][j];
-        }
-        dist[i] = sqrt(_sum);
-    }
-
-    int in_rad = 0;
-    for (double e: dist) {
-        if (e < rad) in_rad++;
-    }
-    // 最优cost，最优粒子索引，小于rad的粒子数
-    tuple<double, int, int> infor = {swarm_best_cost, swarm_best_idx, in_rad};
-    printCost(per_cost);
-
-    return {swarm_best_pos, infor};
-}
+#include "utils.h"
 
 /**
  * 计算cost，以觅食、聚群、追尾三种方式，返回三种方式中最好的pos和cost
+ * 我也不懂这个函数名字为什么这样取，只能说源码确实挺像屎的
  * @param agent_pos
  * @param args
  * @return
  */
 tuple<vector<double>, vector<vector<double>>, vector<double>>
-PSOAFSA::path_length(const vector<vector<double>> &agent_pos, const Args &args) {
+path_length(const vector<vector<double>> &agent_pos, const Args &args) {
 
     // 不进行行为下的cost
     vector<double> f = calc_path_length(agent_pos, args);
@@ -280,7 +16,7 @@ PSOAFSA::path_length(const vector<vector<double>> &agent_pos, const Args &args) 
     // 觅食行为下找到的更好的随机点以及此随机点下的cost
     vector<vector<double>> forage_agent_pos;
     vector<double> forage_cost;
-    tie(forage_agent_pos, forage_cost) = forage(agent_pos, f, args, visual, 5);
+    tie(forage_agent_pos, forage_cost) = forage(agent_pos, f, args, 20, 5);
 
     // 聚群行为下找到的更好的点以及此点下的cost
     vector<vector<double>> huddle_agent_pos;
@@ -297,11 +33,12 @@ PSOAFSA::path_length(const vector<vector<double>> &agent_pos, const Args &args) 
 
 /**
  * 返回最小化的函数，即当没有任何障碍冲突时的路径长度。
+ * calc_path_length for vector<vector<double>>
  * @param agent_pos
  * @param args
  * @return
  */
-vector<double> PSOAFSA::calc_path_length(vector<vector<double>> agent_pos, const Args &args) {
+vector<double> calc_path_length(vector<vector<double>> agent_pos, const Args &args) {
     int len = (int) args.starts_tdv.size();
     vector<double> Xs, Ys, Xg, Yg;
     Xs.reserve(len);
@@ -421,8 +158,6 @@ vector<double> PSOAFSA::calc_path_length(vector<vector<double>> agent_pos, const
     delete[] yy;
     delete[] cur_y;
     delete[] cur_x;
-    delete[] t;
-    delete[] s;
     // ************************* 插值 end *******************************
 
 
@@ -432,8 +167,8 @@ vector<double> PSOAFSA::calc_path_length(vector<vector<double>> agent_pos, const
      * (2)使用差分数组求整条线的距离
      * */
     // 求差分数组
-    vector<vector<double>> dx = diff(Px);
-    vector<vector<double>> dy = diff(Py);
+    vector<vector<double>> dx = numpy_diff(Px);
+    vector<vector<double>> dy = numpy_diff(Py);
 
     vector<double> L;
     L.reserve(n_pop);
@@ -452,9 +187,14 @@ vector<double> PSOAFSA::calc_path_length(vector<vector<double>> agent_pos, const
     // 本次损失
     vector<double> cur_f;
     for (int i = 0; i < n_pop; i++) {
-        cur_f.push_back(L[i] * (1 + err[i]));
-//        cur_f.push_back(L[i]);
+//        cur_f.push_back(L[i] * (1.0 + err[i]));
+        cur_f.push_back(L[i] * (0.4 + err[i]));
     }
+
+    // 释放内存
+    delete[] t;
+    delete[] s;
+
     return cur_f;
 }
 
@@ -467,7 +207,7 @@ vector<double> PSOAFSA::calc_path_length(vector<vector<double>> agent_pos, const
  * @return
  */
 tuple<vector<double>, int>
-PSOAFSA::path_penalty(const vector<Obstacle> &obs, vector<vector<double>> Px, vector<vector<double>> Py) {
+path_penalty(const vector<Obstacle> &obs, vector<vector<double>> Px, vector<vector<double>> Py) {
     // 粒子数 维度
     int n_pop = (int) Px.size();
     int dim = (int) Px[0].size();
@@ -515,7 +255,7 @@ PSOAFSA::path_penalty(const vector<Obstacle> &obs, vector<vector<double>> Px, ve
                 for (int m = 0; m < n_pop; m++) {
                     for (int n = 0; n < dim; n++) {
                         double side = (Py[m][n] - V[index][1]) * (V[i][0] - V[index][0]) -
-                                      (Px[m][n] - V[index][0]) * (V[i][1] - V[index][1]);
+                                     (Px[m][n] - V[index][0]) * (V[i][1] - V[index][1]);
                         a[m][n] = fmin(a[m][n], side);
                     }
                 }
@@ -561,7 +301,7 @@ PSOAFSA::path_penalty(const vector<Obstacle> &obs, vector<vector<double>> Px, ve
  * @return              返回在尝试次数内每个粒子找到的更好的随机点坐标以及cost，没有找到的就返回自身
  */
 tuple<vector<vector<double>>, vector<double>>
-PSOAFSA::forage(const vector<vector<double>> &agent_pos, const vector<double> &agent_cost, const Args &args, int Visual,
+forage(const vector<vector<double>> &agent_pos, const vector<double> &agent_cost, const Args &args, int Visual,
        int trynum) {
 
     vector<double> forage_cost(agent_cost);
@@ -591,7 +331,7 @@ PSOAFSA::forage(const vector<vector<double>> &agent_pos, const vector<double> &a
  * @return
  */
 tuple<vector<vector<double>>, vector<double>>
-PSOAFSA::huddle(vector<vector<double>> agent_pos, const Args &args, const vector<vector<double>> &forage_agent_pos,
+huddle(vector<vector<double>> agent_pos, const Args &args, const vector<vector<double>> &forage_agent_pos,
        vector<double> forage_cost) {
 
     int n_pop = (int) agent_pos.size();
@@ -646,7 +386,7 @@ PSOAFSA::huddle(vector<vector<double>> agent_pos, const Args &args, const vector
  * @return
  */
 tuple<vector<vector<double>>, vector<double>>
-PSOAFSA::follow(const vector<vector<double>> &agent_pos, const Args &args, vector<vector<double>> huddle_agent_pos,
+follow(const vector<vector<double>> &agent_pos, const Args &args, vector<vector<double>> huddle_agent_pos,
        const vector<double> &huddle_cost, const vector<double> &f, int Visual) {
 
     vector<double> follow_cost(huddle_cost);
@@ -668,15 +408,17 @@ PSOAFSA::follow(const vector<vector<double>> &agent_pos, const Args &args, vecto
  * @param Visual
  * @return
  */
-vector<vector<double>> PSOAFSA::moveRandomly(const vector<vector<double>> &agent_pos, double Visual) {
+vector<vector<double>> moveRandomly(const vector<vector<double>> &agent_pos, double Visual) {
 
     vector<vector<double>> new_agent_pos = agent_pos;
 
+    random_device rd;
+    mt19937 gen(rd());
     uniform_real_distribution<> dis(0.0, 1.0);
 
     for (int i = 0; i < agent_pos.size(); i++) {
         for (int j = 0; j < agent_pos[i].size(); j++) {
-            double e = Visual * (2 * dis(engine) - 1);
+            double e = Visual * (2 * dis(gen) - 1);
             new_agent_pos[i][j] += e;
         }
     }
@@ -690,17 +432,20 @@ vector<vector<double>> PSOAFSA::moveRandomly(const vector<vector<double>> &agent
  * @param agent_vel
  * @return
  */
-vector<vector<double>> PSOAFSA::random_back_conf(const vector<vector<double>> &agent_vel) {
+vector<vector<double>> random_back_conf(const vector<vector<double>> &agent_vel) {
     int n_pop = (int) agent_vel.size();
     int dim = (int) agent_vel[0].size();
 
+    // c++11中引入的随机数
+    random_device rd;
+    mt19937 gen(rd());
     uniform_real_distribution<> dis(0.0, 1.0);
 
     // 矩阵大小相同，相当于预置矩阵的大小
     vector<vector<double>> vel_conf(n_pop, vector<double>(dim));
     for (int i = 0; i < n_pop; i++) {
         for (int j = 0; j < dim; j++) {
-            vel_conf[i][j] = -dis(engine) * agent_vel[i][j];
+            vel_conf[i][j] = -dis(gen) * agent_vel[i][j];
         }
     }
     // 返回处理结果
@@ -716,7 +461,7 @@ vector<vector<double>> PSOAFSA::random_back_conf(const vector<vector<double>> &a
  * @return
  */
 vector<vector<double>>
-PSOAFSA::hyperbolic_conf(vector<vector<double>> &agent_pos, vector<vector<double>> &agent_vel, vector<int> UB, vector<int> LB) {
+hyperbolic_conf(vector<vector<double>> &agent_pos, vector<vector<double>> &agent_vel, vector<int> UB, vector<int> LB) {
 
     int n_pop = agent_vel.size();
     int n_var = agent_vel[0].size();
@@ -750,7 +495,7 @@ PSOAFSA::hyperbolic_conf(vector<vector<double>> &agent_pos, vector<vector<double
  * @return
  */
 vector<vector<double>>
-PSOAFSA::mixed_conf(vector<vector<double>> &agent_pos, vector<vector<double>> &agent_vel, vector<int> UB, vector<int> LB) {
+mixed_conf(vector<vector<double>> &agent_pos, vector<vector<double>> &agent_vel, vector<int> UB, vector<int> LB) {
 
     int n_pop = agent_vel.size();
     int n_var = agent_vel[0].size();
@@ -762,45 +507,24 @@ PSOAFSA::mixed_conf(vector<vector<double>> &agent_pos, vector<vector<double>> &a
 
     vector<vector<double>> vel_conf(n_pop, vector<double>(n_var));
 
+    random_device rd;
+    mt19937 gen(rd());
     uniform_real_distribution<> dis(0.0, 1.0);
 
     for (int i = 0; i < n_pop; i++) {
         for (int j = 0; j < n_var; j++) {
-            vel_conf[i][j] = dis(engine) >= 0.5 ? vel_hy[i][j] : vel_rb[i][j];
+            vel_conf[i][j] = dis(gen) >= 0.5 ? vel_hy[i][j] : vel_rb[i][j];
         }
     }
 
     return vel_conf;
 }
 
-/**
- * 二维数组元素按列差分：后一列减去前一列
- * @param origin  原数组
- * @return      做好减法的数组
- */
-vector<vector<double>> PSOAFSA::diff(const vector<vector<double>> &origin) {
-    vector<vector<double>> res(origin.size(), vector<double>(origin[0].size() - 1));
-    for (int i = 0; i < origin.size(); i++) {
-        for (int j = 0; j < origin[i].size() - 1; j++) {
-            res[i][j] = origin[i][j + 1] - origin[i][j];
-        }
-    }
-    return res;
-}
 
-
-void PSOAFSA::printCost(const vector<double> &cost) {
+void printCost(const vector<double> &cost) {
     cout << "[" << cost[0];
     for (int i = 1; i < cost.size(); i++) {
         cout << ", " << cost[i];
     }
     cout << "]" << endl;
-}
-
-int PSOAFSA::getVisual() const {
-    return visual;
-}
-
-void PSOAFSA::setVisual(int visual) {
-    PSOAFSA::visual = visual;
 }
